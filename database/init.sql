@@ -56,13 +56,18 @@ CREATE TABLE IF NOT EXISTS transfer_orders (
     sku_id BIGINT NOT NULL,
     quantity INT NOT NULL,
     reason VARCHAR(255) DEFAULT '',
+    -- status 取值：draft(草稿)/pending(待确认)/confirmed(已确认)/shipped(已发货)/received(已收货)/cancelled(已取消)/voided(草稿作废)
     status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    creator_id BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_transfer_orders_from ON transfer_orders(from_store_id);
 CREATE INDEX IF NOT EXISTS idx_transfer_orders_to ON transfer_orders(to_store_id);
 CREATE INDEX IF NOT EXISTS idx_transfer_orders_status ON transfer_orders(status);
+CREATE INDEX IF NOT EXISTS idx_transfer_orders_creator ON transfer_orders(creator_id);
+-- 兼容旧库：若表已存在则补齐草稿环节所需的 creator_id 列。
+ALTER TABLE transfer_orders ADD COLUMN IF NOT EXISTS creator_id BIGINT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS stock_records (
     id BIGSERIAL PRIMARY KEY,

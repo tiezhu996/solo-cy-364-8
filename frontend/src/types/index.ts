@@ -56,7 +56,9 @@ export interface TransferOrder {
   quantity: number
   reason: string
   status: TransferStatusValue
+  creator_id: number
   created_at: string
+  updated_at?: string
 }
 
 export interface StockRecord {

@@ -29,6 +29,8 @@ func FormatQuantity(qty int) string {
 
 func TransferStatusText(s constants.TransferStatus) string {
 	switch s {
+	case constants.TransferDraft:
+		return "草稿"
 	case constants.TransferPending:
 		return "待确认"
 	case constants.TransferConfirmed:

@@ -122,7 +122,7 @@ func (r *Router) registerV1(v1 *gin.RouterGroup) {
 	skuSvc := service.NewSKUService(skuRepo, r.logger)
 	invSvc := service.NewStoreInventoryService(invRepo, skuRepo, r.db, r.logger)
 	recordSvc := service.NewStockRecordService(recordRepo, invRepo, storeRepo, skuRepo, invSvc, r.db, r.logger)
-	transferSvc := service.NewTransferOrderService(transferRepo, invSvc, recordSvc, r.db, r.logger)
+	transferSvc := service.NewTransferOrderService(transferRepo, storeRepo, skuRepo, invSvc, recordSvc, r.db, r.logger)
 
 	userHandler := handler.NewUserHandler(userSvc)
 	storeHandler := handler.NewStoreHandler(storeSvc)

@@ -16,6 +16,7 @@ type TransferOrderRepository interface {
 	Create(order *model.TransferOrder) error
 	FindByID(id uint) (*model.TransferOrder, error)
 	List(page, pageSize int, storeID uint, status constants.TransferStatus) ([]model.TransferOrder, int64, error)
+	ListDrafts(page, pageSize int, creatorID uint) ([]model.TransferOrder, int64, error)
 	Update(order *model.TransferOrder) error
 	UpdateTx(tx *gorm.DB, order *model.TransferOrder) error
 	TransitionStatusTx(tx *gorm.DB, id uint, from, to constants.TransferStatus) error
@@ -53,6 +54,8 @@ func (r *transferOrderRepository) List(page, pageSize int, storeID uint, status 
 	var orders []model.TransferOrder
 	var total int64
 	q := r.db.Model(&model.TransferOrder{})
+	// 草稿及其作废终态不进入确认队列，普通列表（含默认待确认视图）一律排除。
+	q = q.Where("status NOT IN ?", []constants.TransferStatus{constants.TransferDraft, constants.TransferVoided})
 	if storeID > 0 {
 		q = q.Where("from_store_id = ? OR to_store_id = ?", storeID, storeID)
 	}
@@ -65,6 +68,23 @@ func (r *transferOrderRepository) List(page, pageSize int, storeID uint, status 
 	if err := q.Preload("FromStore").Preload("ToStore").Preload("SKU").
 		Offset((page - 1) * pageSize).Limit(pageSize).Order("id desc").Find(&orders).Error; err != nil {
 		return nil, 0, fmt.Errorf("list transfer orders: %w", err)
+	}
+	return orders, total, nil
+}
+
+// ListDrafts 查询某店长（创建人）名下的草稿及其作废留痕（draft/voided），草稿在前，仅创建人本人可见。
+func (r *transferOrderRepository) ListDrafts(page, pageSize int, creatorID uint) ([]model.TransferOrder, int64, error) {
+	var orders []model.TransferOrder
+	var total int64
+	q := r.db.Model(&model.TransferOrder{}).
+		Where("status IN ? AND creator_id = ?", []constants.TransferStatus{constants.TransferDraft, constants.TransferVoided}, creatorID)
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count transfer drafts: %w", err)
+	}
+	if err := q.Preload("FromStore").Preload("ToStore").Preload("SKU").
+		Offset((page - 1) * pageSize).Limit(pageSize).
+		Order("status asc, updated_at desc, id desc").Find(&orders).Error; err != nil {
+		return nil, 0, fmt.Errorf("list transfer drafts: %w", err)
 	}
 	return orders, total, nil
 }

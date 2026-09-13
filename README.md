@@ -26,7 +26,8 @@ docker compose up -d --build
 
 - 多门店 SKU 主数据统一维护与批量导入
 - 门店库存实时同步、安全库存阈值与低库存预警
-- 调拨申请 → 审批确认 → 发货 → 收货全流程状态机
+- 调拨申请支持**草稿暂存**：库存不足也能先存草稿，草稿不进入确认队列；仅创建店长本人可编辑/作废，提交时才校验库存并转为待确认（不足则保留草稿）
+- 调拨申请 → 审批确认 → 发货 → 收货全流程状态机（申请、确认、发货、收货、取消行为保持不变）
 - 出入库明细（采购/调拨/销售/损耗）、周期盘点与盘盈盘亏计算
 - 滞销商品分析与智能补货建议报表
 - JWT 认证 + RBAC 角色权限（总部/店长/管理员）+ 接口限流
@@ -138,12 +139,17 @@ cy-364/
 | GET | /api/v1/inventories/alerts | 低库存预警列表 | 登录 |
 | POST | /api/v1/inventories/ensure | 初始化/确保库存记录 | 店长/管理员/总部 |
 | PUT | /api/v1/inventories/:id/safety-stock | 设置安全库存 | 店长/管理员/总部 |
-| GET | /api/v1/transfers | 调拨单分页列表 | 登录 |
+| GET | /api/v1/transfers | 调拨单分页列表（不含草稿/作废） | 登录 |
 | POST | /api/v1/transfers | 创建调拨申请 | 店长/管理员/总部，严格限流 |
 | PUT | /api/v1/transfers/:id/confirm | 审批确认 | 管理员/总部 |
 | PUT | /api/v1/transfers/:id/ship | 发货并扣减调出库存 | 店长/管理员/总部 |
 | PUT | /api/v1/transfers/:id/receive | 收货并增加调入库存 | 店长/管理员/总部 |
 | PUT | /api/v1/transfers/:id/cancel | 取消调拨单 | 店长/管理员/总部 |
+| GET | /api/v1/transfer-drafts | 我的草稿分页列表（仅本人） | 店长 |
+| POST | /api/v1/transfer-drafts | 暂存草稿（允许库存不足） | 店长，严格限流 |
+| PUT | /api/v1/transfer-drafts/:id | 编辑本人草稿 | 店长 |
+| PUT | /api/v1/transfer-drafts/:id/submit | 提交草稿：校验库存并转待确认，不足保留草稿 | 店长，严格限流 |
+| PUT | /api/v1/transfer-drafts/:id/void | 作废本人草稿 | 店长 |
 | GET | /api/v1/records | 出入库记录分页列表 | 登录 |
 | GET | /api/v1/records/export | 导出出入库记录 | 登录 |
 | POST | /api/v1/records | 创建出入库记录并调整库存 | 店长/管理员/总部 |
@@ -156,8 +162,9 @@ cy-364/
 ## 枚举出现位置清单
 
 ### TransferStatus（调拨单状态）
-- 后端：`backend/internal/constants/transfer.go`（定义 + Valid + TransferStatusFlow + CanTransfer）、`backend/internal/model/transfer_order.go`（GORM 模型）、`backend/internal/service/transfer_order_service.go`（状态机）、`backend/internal/handler/transfer_order_handler.go`（流转接口）、`backend/internal/util/formatters.go`（状态文本）、`backend/internal/constants/log_templates.go`（日志模板）、`backend/internal/constants/error_codes.go`/`messages.go`（文案）
-- 前端：`frontend/src/constants/transfer.ts`（定义 + 文案 + 流转）、`frontend/src/types/index.ts`（类型）、`frontend/src/components/common/TransferStatusBadge.vue`（状态徽章）、`frontend/src/pages/Transfers.vue`（按钮显隐与筛选）、`frontend/src/api/transferOrder.ts`
+取值：`draft`（草稿）、`pending`（待确认）、`confirmed`（已确认）、`shipped`（已发货）、`received`（已收货）、`cancelled`（已取消）、`voided`（草稿作废）。草稿仅创建人本人可见/可操作，不进入确认队列；作废草稿用独立终态 `voided`，与正式单的 `cancelled` 区分。
+- 后端：`backend/internal/constants/transfer.go`（定义 + Valid + TransferStatusFlow + CanTransfer）、`backend/internal/model/transfer_order.go`（GORM 模型 + `creator_id` 创建人）、`backend/internal/repository/transfer_order_repository.go`（主列表排除 draft/voided、`ListDrafts` 仅查本人）、`backend/internal/service/transfer_order_service.go`（状态机 + `SaveDraft/UpdateDraft/VoidDraft/SubmitDraft` 草稿归属与库存校验）、`backend/internal/handler/transfer_order_handler.go`（草稿与流转接口）、`backend/internal/router/transfer_orders.go`（`/transfer-drafts` 仅店长）、`backend/internal/dto/transfer_dto.go`（草稿请求体）、`backend/internal/util/formatters.go`（状态文本）、`backend/internal/constants/log_templates.go`（日志模板）、`backend/internal/constants/messages.go`（文案）、`backend/internal/constants/error_codes.go`、`database/init.sql`（`creator_id` 列与状态取值注释）
+- 前端：`frontend/src/constants/transfer.ts`（定义 + 文案 + 流转）、`frontend/src/types/index.ts`（类型 + `creator_id`）、`frontend/src/components/common/TransferStatusBadge.vue`（状态徽章）、`frontend/src/pages/Transfers.vue`（"我的草稿"页签、暂存/编辑/作废/提交与按钮显隐、主列表筛选）、`frontend/src/api/transferOrder.ts`（草稿接口）
 
 ### StockRecordType（出入库类型）
 - 后端：`backend/internal/constants/stock_record.go`（定义 + Valid + StockDirection）、`backend/internal/model/stock_record.go`（GORM 模型）、`backend/internal/service/stock_record_service.go`、`backend/internal/handler/stock_record_handler.go`、`backend/internal/util/formatters.go`（类型文本）、`backend/internal/constants/log_templates.go`、`backend/internal/repository/stock_record_repository.go`

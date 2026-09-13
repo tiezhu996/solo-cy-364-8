@@ -7,6 +7,7 @@ import (
 )
 
 // TransferOrder 调拨单：调出/调入门店间 SKU 调拨，全程留痕。
+// 草稿（status=draft）由创建人 CreatorID 店长持有，不进入确认队列，可经"提交"转为待确认。
 type TransferOrder struct {
 	ID          uint                     `gorm:"primaryKey" json:"id"`
 	FromStoreID uint                     `gorm:"index;not null" json:"from_store_id"`
@@ -18,6 +19,7 @@ type TransferOrder struct {
 	Quantity    int                      `gorm:"not null" json:"quantity"`
 	Reason      string                   `gorm:"size:255" json:"reason"`
 	Status      constants.TransferStatus `gorm:"size:16;index;not null" json:"status"`
+	CreatorID   uint                     `gorm:"index;not null;default:0" json:"creator_id"`
 	CreatedAt   time.Time                `json:"created_at"`
 	UpdatedAt   time.Time                `json:"updated_at"`
 }
