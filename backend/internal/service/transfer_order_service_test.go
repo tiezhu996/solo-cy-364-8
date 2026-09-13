@@ -80,7 +80,23 @@ func (m *mockTransferOrderRepo) Update(o *model.TransferOrder) error {
 	m.items[o.ID] = &cp
 	return nil
 }
-func (m *mockTransferOrderRepo) UpdateTx(tx *gorm.DB, o *model.TransferOrder) error { return m.Update(o) }
+func (m *mockTransferOrderRepo) UpdateTx(tx *gorm.DB, o *model.TransferOrder) error {
+	return m.Update(o)
+}
+
+// UpdateDraftFieldsTx 条件更新：仅当仍是本人草稿时改可编辑字段，绝不回写 status。
+func (m *mockTransferOrderRepo) UpdateDraftFieldsTx(tx *gorm.DB, o *model.TransferOrder) error {
+	ex, ok := m.items[o.ID]
+	if !ok || ex.CreatorID != o.CreatorID || ex.Status != constants.TransferDraft {
+		return util.ErrConflict
+	}
+	ex.FromStoreID = o.FromStoreID
+	ex.ToStoreID = o.ToStoreID
+	ex.SKUID = o.SKUID
+	ex.Quantity = o.Quantity
+	ex.Reason = o.Reason
+	return nil
+}
 func (m *mockTransferOrderRepo) TransitionStatusTx(tx *gorm.DB, id uint, from, to constants.TransferStatus) error {
 	o, ok := m.items[id]
 	if !ok || o.Status != from {
@@ -128,9 +144,9 @@ func TestSaveDraft(t *testing.T) {
 func TestSaveDraftValidation(t *testing.T) {
 	svc, _, _ := newTestTransferService()
 	tests := []struct {
-		name                       string
-		from, to, sku              uint
-		qty                        int
+		name          string
+		from, to, sku uint
+		qty           int
 	}{
 		{"same store", 1, 1, 10, 1},
 		{"zero qty", 1, 2, 10, 0},
@@ -225,5 +241,84 @@ func TestVoidDraft(t *testing.T) {
 	// 作废记录不进入普通确认队列。
 	if _, total, _ := svc.List(1, 10, 0, ""); total != 0 {
 		t.Fatalf("voided draft must not enter confirm queue, total=%d", total)
+	}
+}
+
+// TestDraftEditVsSubmitRace：提交先完成后，后到的编辑保存必须冲突，且不能把单据改回草稿、不能改字段。
+func TestDraftEditVsSubmitRace(t *testing.T) {
+	svc, invSvc, repo := newTestTransferService()
+	if _, err := invSvc.Ensure(1, 10, 10); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	d, err := svc.SaveDraft(100, 1, 2, 10, 2, "原始")
+	if err != nil {
+		t.Fatalf("save draft: %v", err)
+	}
+	// 提交先完成：draft -> pending。
+	if _, err := svc.SubmitDraft(d.ID, 100); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	// 编辑保存后到：必须返回冲突。
+	if _, err := svc.UpdateDraft(d.ID, 100, 1, 3, 10, 9, "被竞争的修改"); !errors.Is(err, util.ErrConflict) {
+		t.Fatalf("late edit after submit should conflict, got %v", err)
+	}
+	// 原状态保持 pending，字段不被覆盖。
+	got, err := repo.FindByID(d.ID)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	if got.Status != constants.TransferPending {
+		t.Fatalf("status=%s want pending (must not be reset to draft)", got.Status)
+	}
+	if got.Quantity != 2 || got.ToStoreID != 2 || got.Reason != "原始" {
+		t.Fatalf("fields overwritten by failed edit: %+v", got)
+	}
+}
+
+// TestDraftEditVsVoidRace：作废先完成后，后到的编辑保存必须冲突且状态保持已作废。
+func TestDraftEditVsVoidRace(t *testing.T) {
+	svc, _, repo := newTestTransferService()
+	d, _ := svc.SaveDraft(100, 1, 2, 10, 2, "")
+	if _, err := svc.VoidDraft(d.ID, 100); err != nil {
+		t.Fatalf("void: %v", err)
+	}
+	if _, err := svc.UpdateDraft(d.ID, 100, 1, 3, 10, 9, ""); !errors.Is(err, util.ErrConflict) {
+		t.Fatalf("late edit after void should conflict, got %v", err)
+	}
+	got, _ := repo.FindByID(d.ID)
+	if got.Status != constants.TransferVoided || got.Quantity != 2 {
+		t.Fatalf("after void, late edit changed order: %+v", got)
+	}
+}
+
+// TestDraftSubmitVsVoidRace：提交与作废竞争，后到一方必须冲突且原状态不变。
+func TestDraftSubmitVsVoidRace(t *testing.T) {
+	svc, invSvc, repo := newTestTransferService()
+	if _, err := invSvc.Ensure(1, 10, 10); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	d, _ := svc.SaveDraft(100, 1, 2, 10, 2, "")
+
+	// 先提交成功，后作废必须冲突，保持 pending。
+	if _, err := svc.SubmitDraft(d.ID, 100); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if _, err := svc.VoidDraft(d.ID, 100); !errors.Is(err, util.ErrConflict) {
+		t.Fatalf("late void after submit should conflict, got %v", err)
+	}
+	if got, _ := repo.FindByID(d.ID); got.Status != constants.TransferPending {
+		t.Fatalf("status=%s want pending", got.Status)
+	}
+
+	// 另一张草稿：先作废，后提交必须冲突，保持 voided。
+	d2, _ := svc.SaveDraft(100, 1, 2, 10, 2, "")
+	if _, err := svc.VoidDraft(d2.ID, 100); err != nil {
+		t.Fatalf("void d2: %v", err)
+	}
+	if _, err := svc.SubmitDraft(d2.ID, 100); !errors.Is(err, util.ErrConflict) {
+		t.Fatalf("late submit after void should conflict, got %v", err)
+	}
+	if got, _ := repo.FindByID(d2.ID); got.Status != constants.TransferVoided {
+		t.Fatalf("status=%s want voided", got.Status)
 	}
 }

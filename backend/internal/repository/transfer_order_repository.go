@@ -19,6 +19,9 @@ type TransferOrderRepository interface {
 	ListDrafts(page, pageSize int, creatorID uint) ([]model.TransferOrder, int64, error)
 	Update(order *model.TransferOrder) error
 	UpdateTx(tx *gorm.DB, order *model.TransferOrder) error
+	// UpdateDraftFieldsTx 仅当单据仍是本人草稿（id+creator_id+status=draft）时更新可编辑字段，
+	// 不写 status/creator_id，避免并发的提交/作废已改状态后被整行覆盖回草稿。
+	UpdateDraftFieldsTx(tx *gorm.DB, order *model.TransferOrder) error
 	TransitionStatusTx(tx *gorm.DB, id uint, from, to constants.TransferStatus) error
 }
 
@@ -96,6 +99,28 @@ func (r *transferOrderRepository) Update(order *model.TransferOrder) error {
 func (r *transferOrderRepository) UpdateTx(tx *gorm.DB, order *model.TransferOrder) error {
 	if err := dbOrTx(r.db, tx).Save(order).Error; err != nil {
 		return fmt.Errorf("update transfer order: %w", err)
+	}
+	return nil
+}
+
+// UpdateDraftFieldsTx 条件更新草稿字段：仅当 id + creator_id + status=draft 仍匹配时生效，
+// 只更新门店/商品/数量/原因，不回写 status（updated_at 由 GORM 自动刷新）。
+func (r *transferOrderRepository) UpdateDraftFieldsTx(tx *gorm.DB, order *model.TransferOrder) error {
+	res := dbOrTx(r.db, tx).Model(&model.TransferOrder{}).
+		Where("id = ? AND creator_id = ? AND status = ?", order.ID, order.CreatorID, constants.TransferDraft).
+		Updates(map[string]any{
+			"from_store_id": order.FromStoreID,
+			"to_store_id":   order.ToStoreID,
+			"sku_id":        order.SKUID,
+			"quantity":      order.Quantity,
+			"reason":        order.Reason,
+		})
+	if res.Error != nil {
+		return fmt.Errorf("update transfer draft fields: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		// 单据不存在、非本人所有，或已被并发提交/作废（status 不再是 draft）。
+		return fmt.Errorf("update transfer draft fields: %w", util.ErrConflict)
 	}
 	return nil
 }

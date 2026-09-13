@@ -93,6 +93,8 @@ func (s *transferOrderService) ListDrafts(page, pageSize int, creatorID uint) ([
 }
 
 // UpdateDraft 编辑草稿，仅草稿创建人本人可操作；同样允许库存不足时保存。
+// 使用带状态条件的原子更新：若在加载后被并发的提交/作废先改变状态，则本次保存命中 0 行并返回冲突，
+// 不会把已提交/已作废的单据覆盖回草稿。
 func (s *transferOrderService) UpdateDraft(id, creatorID, fromStoreID, toStoreID, skuID uint, quantity int, reason string) (*model.TransferOrder, error) {
 	order, err := s.loadOwnedDraft(id, creatorID)
 	if err != nil {
@@ -106,8 +108,9 @@ func (s *transferOrderService) UpdateDraft(id, creatorID, fromStoreID, toStoreID
 	order.SKUID = skuID
 	order.Quantity = quantity
 	order.Reason = reason
-	if err := s.orderRepo.Update(order); err != nil {
-		return nil, fmt.Errorf("update draft[id=%d]: %w", id, err)
+	order.CreatorID = creatorID
+	if err := s.orderRepo.UpdateDraftFieldsTx(nil, order); err != nil {
+		return nil, fmt.Errorf("update draft[id=%d] creator[%d]: %w", id, creatorID, err)
 	}
 	s.logger.Info(constants.LogTransferDraftUpdated, "order_id", id, "creator", creatorID, "from", fromStoreID, "to", toStoreID, "sku", skuID, "qty", quantity)
 	return order, nil
